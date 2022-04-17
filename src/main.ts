@@ -1,6 +1,45 @@
 import * as THREE from 'three';
 import mapData from "./data/world.geo.json/countries.geo.json"
 import { Vector2 } from 'three';
+import workshopData from "./data/WorkshopUpload.extracted.json"
+import _ from "lodash"
+
+
+interface FrameData {
+    w: number;
+    h: number;
+    x: number;
+    y: number;
+}
+
+interface Frame {
+    frame: FrameData;
+}
+
+export default class TextureAtlas {
+    constructor(json: { frames: Record<string, Frame> }, image: HTMLImageElement) {
+        this._textures = {};
+        let texture = new THREE.Texture(image);
+        texture.needsUpdate = true;
+
+        let frames = json.frames;
+        Object.keys(frames).forEach(function (key: any, i) {
+            let frame: Frame = frames[key];
+            let t = texture.clone();
+            let data = frame.frame;
+            t.repeat.set(data.w / image.width, data.h / image.height);
+            t.offset.x = ((data.x) / image.width);
+            t.offset.y = 1 - (data.h / image.height) - (data.y / image.height);
+            t.needsUpdate = true;
+
+            this._textures[key.replace('.png', '').toLowerCase()] = t;
+        }, this);
+    }
+
+    get(id) {
+        return this._textures[id];
+    }
+}
 
 const provinceColors: Record<string, number> = {
     "AFG": 6048606,
@@ -321,9 +360,17 @@ interface Province {
 
 type ProvincesDirectory = Record<string, Province>;
 
+interface Card {
+    name: string;
+    sprite: THREE.Sprite;
+}
+
+type CardDirectory = Record<CardId, Card>
+
 interface State {
-    provinces: ProvincesDirectory
+    provinces: ProvincesDirectory;
     selectedProvince: Province | null;
+    cardDirectory: CardDirectory;
 }
 
 const isProvinceHovered = (province: Province) => hoveredProvinceId === province.name
@@ -376,7 +423,6 @@ const createProvinceMesh = (scene: any, province: Province) => {
     const material = new THREE.MeshBasicMaterial({ color: color });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = name
-    scene.add(mesh);
     return mesh
 }
 
@@ -392,7 +438,7 @@ const reset = () => {
     printColorMap()
 }
 
-const loadInitialState = (): State => {
+const loadInitialState = async (): Promise<State> => {
     const provinces: Province[] = [];
 
     const addProvince = (name: string, vertices: any[]) => {
@@ -436,6 +482,7 @@ const loadInitialState = (): State => {
             acc[p.name] = p
             return acc;
         }, {} as ProvincesDirectory),
+        cardDirectory: await loadCards(),
     }
 }
 
@@ -445,27 +492,167 @@ const getCurrentlyHovered = (): Province | null => {
     return hoveredProvinceId ? state.provinces[hoveredProvinceId] : null
 }
 
-const init = () => {
+const INNER_CARD_WIDTH = 493
+const CARD_WIDTH_FULL = 532
+const CARD_HEIGHT_FULL = 752
+const OUTER_MARGIN_X = 16
+const OUTER_MARGIN_Y = 16
+const INNER_PADDING_X = 26
+const INNER_PADDING_Y = 24
+
+const enum CardId {
+    EnergySector = "energy_sector",
+    HeavyArmor = "heavy_armor",
+    ICBM = "icbm",
+    Infrastructure = "infrastructure",
+}
+
+interface CardLoadInfo {
+    name: CardId,
+    x: number,
+    y: number,
+}
+
+const cardActions: Partial<Record<CardId, () => void>> = {
+    [CardId.ICBM]: () => {
+        console.log("doing icbm");
+    },
+}
+
+interface Deck {
+    width: number,
+    height: number,
+    imageUrl: string,
+    cards: CardLoadInfo[]
+}
+
+const decks: Deck[] = [
+    {
+        imageUrl: "./src/data/face_cards.png",
+        width: 8,
+        height: 4,
+        cards: [
+            {
+                name: CardId.EnergySector, x: 0, y: 0
+            },
+            {
+                name: CardId.HeavyArmor, x: 1, y: 0
+            },
+            {
+                name: CardId.ICBM, x: 4, y: 0
+            },
+            {
+                name: CardId.Infrastructure, x: 6, y: 0
+            },
+        ]
+
+    },
+    {
+        imageUrl:
+            "./src/data/face_cards_2.png",
+        width: 8,
+        height: 5,
+        cards: [],
+    },
+]
+
+const loadCards = async (): Promise<CardDirectory> => {
+    console.log("loading cards");
+    const promises: Promise<Card[]>[] = []
+
+    for (const { imageUrl, cards, } of decks) {
+        const img = new Image()
+        img.src = imageUrl
+
+        const offsetFor = (idxX: number, idxY: number): { x: number, y: number } => {
+            const offsetXPerItem = CARD_WIDTH_FULL + INNER_PADDING_X
+            const offsetYPerItem = CARD_HEIGHT_FULL + INNER_PADDING_Y
+            let x = OUTER_MARGIN_X + (idxX * offsetXPerItem);
+            let y = OUTER_MARGIN_Y + (idxY * offsetYPerItem);
+            return {
+                x, y
+            }
+        }
+
+        const cardFrames = cards.reduce((fr, card) => {
+            fr[card.name] = {
+                frame: {
+                    w: CARD_WIDTH_FULL,
+                    h: CARD_HEIGHT_FULL,
+                    ...offsetFor(card.x, card.y)
+                }
+            }
+            return fr
+        }, {} as Record<CardId, Frame>);
+
+        promises.push(new Promise<Card>((resolve) => {
+            img.onload = () => {
+                var map = new TextureAtlas({ frames: cardFrames }, img)
+                let x = -0.3
+                let y = 2.45
+                const deckCards: Card[] = []
+                for (const [cardName, cardFrame] of Object.entries(cardFrames)) {
+                    var material = new THREE.SpriteMaterial({
+                        map: map.get(cardName),
+                        color: 0xffffff
+                    });
+                    var sprite = new THREE.Sprite(material);
+                    sprite.name = `card_${cardName}`
+                    sprite.scale.set(1, CARD_HEIGHT_FULL / CARD_WIDTH_FULL, 1);
+                    sprite.position.set(x, y, 0)
+                    x += 1.1
+                    const card: Card = { sprite, name: cardName }
+                    deckCards.push(card)
+                }
+                resolve(deckCards)
+            }
+        }))
+    }
+
+    const cardList = await Promise.all(promises)
+    return cardList.reduce((acc, cards) => {
+        for (const card of cards) {
+            acc[card.name] = card;
+        }
+        return acc;
+    }, {} as CardDirectory)
+}
+
+const renderMap = () => {
+    for (const province of Object.values(state.provinces)) {
+        scene.add(province.mesh);
+    }
+}
+
+const renderAllCards = () => {
+    console.log(state.cardDirectory);
+    for (const card of Object.values(state.cardDirectory)) {
+        scene.add(card.sprite);
+    }
+}
+
+const init = async () => {
+    console.log("init");
     raycaster = new THREE.Raycaster();
 
     container = document.createElement('div');
     document.body.appendChild(container);
 
-    const aspect = window.innerWidth / window.innerHeight;
     // camera = new THREE.OrthographicCamera(frustumSize * aspect / - 2, frustumSize * aspect / 2, frustumSize / 2, frustumSize / - 2, 1, 1000);
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
 
     camera.position.set(1.6, 1.7, 2)
 
     scene = new THREE.Scene();
-    state = loadInitialState()
+    state = await loadInitialState()
+    renderMap();
+    renderAllCards();
+
     // scene.background = new THREE.Color(0xf0f0f0);
 
     // const light = new THREE.DirectionalLight(0xffffff, 1);
     // light.position.set(1, 1, 1).normalize();
     // scene.add(light);
-
-
 
     renderer = new THREE.WebGLRenderer();
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -530,6 +717,7 @@ const render = () => {
     for (const object of objects) {
         const obj = object.object;
         const name = obj.name
+        console.log(obj)
         const province = state.provinces[name]
         currentlyHovering = province
     }
@@ -537,7 +725,7 @@ const render = () => {
         // if previolsly hovered something and currently not hovering that same thing, reset that thing
         state.provinces[hoveredProvinceId].dirty = true
     }
-    if (currentlyHovering !== null && hoveredProvinceId !== currentlyHovering.name) {
+    if (currentlyHovering && hoveredProvinceId !== currentlyHovering.name) {
         currentlyHovering.dirty = true
         hoveredProvinceId = currentlyHovering.name
     }
@@ -561,5 +749,9 @@ const render = () => {
     renderer.render(scene, camera);
 }
 
-init();
-animate();
+const main = async () => {
+    await init();
+    animate();
+}
+
+main();
